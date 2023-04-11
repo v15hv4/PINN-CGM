@@ -1,7 +1,45 @@
+import numpy as np
 import pandas as pd
 from utils import dt2int
 
 
+# utility function to interpolate data
+def interpolate(cgm_data, meal_data, insulin_data, resolution=1 * 60):
+    # interpolate data for fitting
+    t_min = min(
+        (
+            meal_data.LocalDtTm.min(),
+            insulin_data.LocalDeliveredDtTm.min(),
+            cgm_data.LocalDtTm.min(),
+        )
+    )
+    t_max = max(
+        (
+            meal_data.LocalDtTm.max(),
+            insulin_data.LocalDeliveredDtTm.max(),
+            cgm_data.LocalDtTm.max(),
+        )
+    )
+    # resolution = 1 * 60   # 1 min
+
+    t_interp = np.arange(t_min, t_max, resolution)
+
+    meal_interp = np.zeros_like(t_interp)
+    for _, row in meal_data.iterrows():
+        meal_interp[int((row.LocalDtTm - t_interp[0]) // 60)] = row.MealSize
+
+    insulin_interp = np.zeros_like(t_interp)
+    for _, row in insulin_data.iterrows():
+        insulin_interp[
+            int((row.LocalDeliveredDtTm - t_interp[0]) // 60)
+        ] = row.DeliveredValue
+
+    cgm_interp = np.interp(t_interp, cgm_data["LocalDtTm"], cgm_data["CGM"])
+
+    return t_interp, cgm_interp, meal_interp, insulin_interp
+
+
+# C3R data class
 class C3RData:
     def __init__(
         self,
