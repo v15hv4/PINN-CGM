@@ -4,7 +4,7 @@ import seaborn as sns
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 
-import pyswarms as ps
+from deap import base, creator, tools, cma
 
 from utils import dt2int
 from torchdiffeq import odeint
@@ -12,11 +12,15 @@ from collections import namedtuple
 from scipy.integrate import solve_ivp
 
 from data import C3RData, interpolate
+from tqdm.notebook import tqdm, trange
 from sklearn.metrics import mean_squared_error, mean_squared_log_error
 
 
 # better plots
 sns.set_style("whitegrid")
+
+# better progressbars
+tqdm.pandas()
 
 
 # required data structures
@@ -117,8 +121,8 @@ max_params = adult_params.max()
 
 
 def get_param(p, p_min, p_max):
-    p_min /= 2
-    p_max *= 2
+    p_min /= 20
+    p_max /= 20
     return ((np.tanh(p) + 1) / 2) * (p_max - p_min) + p_min
 
 
@@ -277,44 +281,89 @@ def loss(p):
         sol_CGM = sol.y[12] / mean_params["Vg"]
 
         try:
-            return mean_squared_log_error(sol_CGM, data_CGM)
+            return [mean_squared_log_error(sol_CGM, data_CGM)]
         except:
-            return 1e10
+            return [1e10]
 
     except:
         print(p)
 
 
-# evaluate the loss function for multiple parameter sets
-def evaluate(p_set):
-    with mp.Pool() as p:
-        losses = p.map(loss, p_set)
-    losses = np.array(losses)
-    return losses
-
-
 # # Optimization
 
 
-# PSO algorithm setup
-# bounds = (p_min, p_max)  # define bounds for each parameter
-options = {"c1": 0.5, "c2": 0.3, "w": 0.9, "k": 2, "p": 2}
+# evolutionary algorithm parameters
+NGEN = 500
+SIGMA = 5
+LAMBDA = 20
 
-# instantiate PSO optimizer
-optimizer = ps.single.GlobalBestPSO(
-    n_particles=100, dimensions=len(p_guess), options=options
-)  # , bounds=bounds)
+# evolutionary algorithm setup
+creator.create("FitnessMin", base.Fitness, weights=[-1.0])
+creator.create("Individual", list, fitness=creator.FitnessMin)
 
-# perform optimization
-best_cost, best_params = optimizer.optimize(evaluate, iters=200)
+toolbox = base.Toolbox()
+toolbox.register("evaluate", loss)
 
-# print results
-print("Best cost:", best_cost)
-print("Best parameters:", best_params)
+# enable multiprocessing
+pool = mp.Pool()
+toolbox.register("map", pool.map)
+
+# ES
+strategy = cma.Strategy(centroid=p_guess, sigma=SIGMA, lambda_=LAMBDA)
+toolbox.register("generate", strategy.generate, creator.Individual)
+toolbox.register("update", strategy.update)
+
+# track best individuals
+hof = tools.HallOfFame(1)
+stats = tools.Statistics(lambda i: i.fitness.values)
+stats.register("avg_loss", np.mean)
+stats.register("min_loss", np.min)
+stats.register("max_loss", np.max)
+
+# train
+pbar = trange(NGEN)
+for _ in pbar:
+    # generate a new population
+    population = toolbox.generate()
+
+    # evaluate the individuals
+    fitnesses = toolbox.map(toolbox.evaluate, population)
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+
+    if hof is not None:
+        hof.update(population)
+
+    # update the strategy with the evaluated individuals
+    toolbox.update(population)
+    record = stats.compile(population) if stats is not None else {}
+    pbar.set_postfix(min_loss=record["min_loss"])
+
+best_params = hof.items[0]
 
 
-np.savetxt("results/best_params_pso.csv", best_params, delimiter=",")
-print("Done. Saved to results/best_params_pso.csv")
+# destructure params
+_kabs, _kmax, _kmin, _k2, _k1, _ki, _kp2, _kp3, _ke1, _kp1 = best_params
+
+# fixed parameters
+kabs = get_param(_kabs, min_params["kabs"], max_params["kabs"])
+kmax = get_param(_kmax, min_params["kmax"], max_params["kmax"])
+kmin = get_param(_kmin, min_params["kmin"], max_params["kmin"])
+k2 = get_param(_k2, min_params["k2"], max_params["k2"])
+k1 = get_param(_k1, min_params["k1"], max_params["k1"])
+ki = get_param(_ki, min_params["ki"], max_params["ki"])
+kp2 = get_param(_kp2, min_params["kp2"], max_params["kp2"])
+kp3 = get_param(_kp3, min_params["kp3"], max_params["kp3"])
+ke1 = get_param(_ke1, min_params["ke1"], max_params["ke1"])
+kp1 = get_param(_kp1, min_params["kp1"], max_params["kp1"])
+
+
+np.savetxt(
+    "results/best_params_evo.csv",
+    np.array((kabs, kmax, kmin, k2, k1, ki, kp2, kp3, ke1, kp1)),
+    delimiter=",",
+)
+print("Done. Saved to results/best_params_evo.csv")
 
 
 sol = solve_ivp(ode, tspan, x_0, t_eval=t_eval, args=(best_params,))
@@ -326,8 +375,8 @@ sol_CGM = sol.y[12] / mean_params["Vg"]
 plt.figure(figsize=(10, 6))
 plt.plot(data_t, data_CGM, "r--")
 plt.plot(sol_t, sol_CGM, "b")
-plt.savefig("results/fit_pso.png")
-print("Done. Saved to results/fit_pso.png")
+plt.savefig("results/fit_evo.png")
+print("Done. Saved to results/fit_evo.png")
 
 
 in_time = test_data_t
@@ -472,13 +521,10 @@ ax[2].set_ylabel("CHO Intake (g)")
 ax[3].plot(test_data_t, test_data_insulin, "green")
 ax[3].set_ylabel("Insulin Delivered (U)")
 ax[3].set_xlabel("Time (min)")
-plt.savefig("results/fit_test1_pso.png")
-print("Done. Saved to results/fit_test1_pso.png")
+plt.savefig("results/fit_test1_evo.png")
+print("Done. Saved to results/fit_test1_evo.png")
 plt.tight_layout()
 plt.show()
-
-
-mean_squared_log_error(test_data_CGM, sol_CGM)
 
 
 in_time = test2_data_t
@@ -625,8 +671,8 @@ ax[2].set_ylabel("CHO Intake (g)")
 ax[3].plot(test2_data_t, test2_data_insulin, "green")
 ax[3].set_ylabel("Insulin Delivered (U)")
 ax[3].set_xlabel("Time (min)")
-plt.savefig("results/fit_test2_pso.png")
-print("Done. Saved to results/fit_test2_pso.png")
+plt.savefig("results/fit_test2_evo.png")
+print("Done. Saved to results/fit_test2_evo.png")
 plt.tight_layout()
 plt.show()
 
@@ -669,3 +715,6 @@ print(kp2, end=",")
 print(kp3, end=",")
 print(ke1, end=",")
 print(kp1, end=",")
+
+
+#
